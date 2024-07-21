@@ -38,8 +38,9 @@ export class KafkaConsumerService implements OnModuleInit, OnApplicationShutdown
 
     await this.consumer.run({
       eachBatchAutoResolve: true,
-      eachMessage: async ({ message, heartbeat }) => {
-        await this.bulkActionService.bulkActionConsumer(message.value.toString());
+      eachMessage: async ({ message, heartbeat, partition }) => {
+        console.log('Partition key:', partition);
+        await this.bulkActionService.bulkActionConsumer(message.value.toString(), partition);
         await heartbeat();
       }
     });

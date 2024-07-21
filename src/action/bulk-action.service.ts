@@ -16,6 +16,7 @@ export class BulkActionService {
     private readonly BATCH_SIZE = 10;
     private readonly BATCH_CACHE_KEY_PREFIX = 'bulk_action_batch_';
     private readonly BATCH_CACHE_KEY_DETAILS_PREFIX = 'bulk_action_batch_details_';
+    private readonly BATCH_STATS_PREFIX = 'bulk_action_stats_';
     private readonly redisClient: Redis
     private readonly entityManager: EntityManager
 
@@ -146,16 +147,36 @@ export class BulkActionService {
         }
     }
 
-    async bulkActionConsumer(message: any) {
+    async getBulkActionStats(actionId: string) {
+        const cacheKey = `${this.BATCH_STATS_PREFIX}_${actionId}`;
+        const stringifiedStats = await this.redisClient.get(cacheKey);
+        return stringifiedStats ? JSON.parse(stringifiedStats) : { updatedCount: 0, failureCount: 0, totalProcessed: 0 };
+    }
+
+    async setBulkActionStats(actionId: string, stats: { updatedCount: number, failureCount: number, totalProcessed: number }) {
+        const cacheKey = `${this.BATCH_STATS_PREFIX}_${actionId}`;
+        return this.redisClient.set(cacheKey, JSON.stringify(stats));
+    }
+
+    async bulkActionConsumer(message: any, partition: number) {
         message = JSON.parse(message)
-        const cacheKey = `${this.BATCH_CACHE_KEY_PREFIX}_${message.actionId}`;
+        const cacheKey = `${this.BATCH_CACHE_KEY_PREFIX}_${message.actionId}_${partition}`;
         await this.redisClient.rpush(cacheKey, JSON.stringify(message.record));
         const cacheListLength = await this.redisClient.llen(cacheKey)
         if (cacheListLength >= this.BATCH_SIZE) {
             const batchRecordsStringified = await this.redisClient.lrange(cacheKey, 0, -1)
             const batchRecords = batchRecordsStringified.map(record => JSON.parse(record))
+            console.log("batch record length ", batchRecords.length)
             const batchDetails = await this.getBatchDetails(message.actionId)
             const output = await this.bulkUpdateRecords(batchDetails.entity, batchRecords)
+            const stats = await this.getBulkActionStats(message.actionId)
+            const updatedStats = {
+                updatedCount: stats.updatedCount + output.updatedCount,
+                failureCount: stats.failureCount + output.failureCount,
+                totalProcessed: stats.totalProcessed + batchRecords.length,
+                lastProcesssedTime: Math.floor(Date.now() / 1000)
+            }
+            await this.setBulkActionStats(message.actionId, updatedStats)
             await this.redisClient.del(cacheKey)
         }
     }
