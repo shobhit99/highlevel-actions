@@ -26,8 +26,7 @@ export class BulkActionService {
         private readonly kafkaProducerService: KafkaProducerService,
         private readonly dataSource: DataSource
     ) {
-        console.log({ REDIS_HOST: this.configService.get<string>('REDIS_HOST'), REDIS_PORT: this.configService.get<number>('REDIS_PORT'), REDIS_PASSWORD: this.configService.get<string>('REDIS_PASSWORD') })
-        this.redisClient = new Redis("rediss://default:AVNS_PU3VWATTgW-Q54D8JU2@caching-3fc601ae-tryhardermate1337-2404.i.aivencloud.com:21909");
+        this.redisClient = new Redis(this.configService.get<string>('REDIS_CONNECTION_STRING'));
         this.entityManager = this.dataSource.createEntityManager();
     }
 
