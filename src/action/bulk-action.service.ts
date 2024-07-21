@@ -10,10 +10,12 @@ import { KafkaProducerService } from 'src/kafka/kafka-producer/kafka-producer.se
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Cache } from 'cache-manager';
 import { Redis } from 'ioredis';
+import { Cron, Interval } from '@nestjs/schedule';
 
 @Injectable()
 export class BulkActionService {
-    private readonly BATCH_SIZE = 10;
+    private readonly CONSUMER_BATCH_SIZE_UNTIL_PROCESSING = 10;
+    private readonly PRODUCER_BATCH_SIZE = 100;
     private readonly BATCH_CACHE_KEY_PREFIX = 'bulk_action_batch_';
     private readonly BATCH_CACHE_KEY_DETAILS_PREFIX = 'bulk_action_batch_details_';
     private readonly BATCH_STATS_PREFIX = 'bulk_action_stats_';
@@ -63,7 +65,7 @@ export class BulkActionService {
             messages.push({ key: actionId, value: JSON.stringify(dataToQueue) });
 
             // Send messages in batches of 100
-            if (messages.length === 100) {
+            if (messages.length === this.PRODUCER_BATCH_SIZE) {
                 await this.kafkaProducerService.sendMessage('bulk-action', messages);
                 messages.length = 0; // Clear the array for the next batch
             }
@@ -132,13 +134,13 @@ export class BulkActionService {
             const updatedCount = result[0].length;
             const skippedCount = records.length - updatedCount;
             
+            // Let's say even if there was no data to be updated, we still consider it as an update
             return {
                 updatedCount,
                 skippedCount,
-                failureCount: 0 // All rows were processed without errors
+                failureCount: 0
             };
         } catch (error) {
-            console.error('Bulk update failed:', error);
             return {
                 updatedCount: 0,
                 skippedCount: 0,
@@ -150,10 +152,10 @@ export class BulkActionService {
     async getBulkActionStats(actionId: string) {
         const cacheKey = `${this.BATCH_STATS_PREFIX}_${actionId}`;
         const stringifiedStats = await this.redisClient.get(cacheKey);
-        return stringifiedStats ? JSON.parse(stringifiedStats) : { updatedCount: 0, failureCount: 0, totalProcessed: 0 };
+        return stringifiedStats ? JSON.parse(stringifiedStats) : { updatedCount: 0, failureCount: 0, totalProcessed: 0, batchId: '' };
     }
 
-    async setBulkActionStats(actionId: string, stats: { updatedCount: number, failureCount: number, totalProcessed: number }) {
+    async setBulkActionStats(actionId: string, stats: { updatedCount: number, failureCount: number, totalProcessed: number, batchId: string }) {
         const cacheKey = `${this.BATCH_STATS_PREFIX}_${actionId}`;
         return this.redisClient.set(cacheKey, JSON.stringify(stats));
     }
@@ -163,24 +165,64 @@ export class BulkActionService {
         const cacheKey = `${this.BATCH_CACHE_KEY_PREFIX}_${message.actionId}_${partition}`;
         await this.redisClient.rpush(cacheKey, JSON.stringify(message.record));
         const cacheListLength = await this.redisClient.llen(cacheKey)
-        if (cacheListLength >= this.BATCH_SIZE) {
-            const batchRecordsStringified = await this.redisClient.lrange(cacheKey, 0, -1)
-            const batchRecords = batchRecordsStringified.map(record => JSON.parse(record))
-            console.log("batch record length ", batchRecords.length)
-            const batchDetails = await this.getBatchDetails(message.actionId)
+        if (cacheListLength >= this.CONSUMER_BATCH_SIZE_UNTIL_PROCESSING) {
+            console.log(`Processing batch for ${message.actionId} - count ${cacheListLength}`)
+            await this.processBatchForConsumer(cacheKey, message.actionId)
+        }
+    }
+
+    private async checkAndMarkBatchAsCompleted(actionId: string) {
+        const stats = await this.getBulkActionStats(actionId)
+        const batchDetails = await this.getBatchDetails(actionId)
+        const totalRecords = batchDetails.totalRecords
+        const skippedRecords = batchDetails.skippedRecords
+        if (stats.totalProcessed === totalRecords - (skippedRecords || 0)) {
+            console.log(`Marking batch ${actionId} as completed`)
+            await this.bulkActionRepository.update({ actionId }, { isCompleted: true })
+        }
+    }
+
+    private async processBatchForConsumer(partitionCacheKey: string, actionId: string) {
+        const batchRecordsStringified = await this.redisClient.lrange(partitionCacheKey, 0, -1)
+        const batchRecords = batchRecordsStringified.map(record => JSON.parse(record))
+        if (batchRecords.length) {
+            console.log(`Processing batch for ${actionId} - count ${batchRecords.length}`)
+            const batchDetails = await this.getBatchDetails(actionId)
             const output = await this.bulkUpdateRecords(batchDetails.entity, batchRecords)
-            const stats = await this.getBulkActionStats(message.actionId)
+            const stats = await this.getBulkActionStats(actionId)
             const updatedStats = {
                 updatedCount: stats.updatedCount + output.updatedCount,
                 failureCount: stats.failureCount + output.failureCount,
                 totalProcessed: stats.totalProcessed + batchRecords.length,
-                lastProcesssedTime: Math.floor(Date.now() / 1000)
+                lastProcesssedTime: Math.floor(Date.now() / 1000),
+                batchId: actionId
             }
-            await this.setBulkActionStats(message.actionId, updatedStats)
-            await this.redisClient.del(cacheKey)
+            await this.setBulkActionStats(actionId, updatedStats)
+            await this.redisClient.del(partitionCacheKey)
+            this.checkAndMarkBatchAsCompleted(actionId)
         }
     }
 
+    private async queueLastBatchForAction(actionId: string) {
+        const stats = await this.getBulkActionStats(actionId)
+        const currentTime = Math.floor(Date.now() / 1000)
+        if (stats.lastProcesssedTime && currentTime - stats.lastProcesssedTime > 10) {
+            const allPartitionCacheKeys = await this.redisClient.keys(`${this.BATCH_CACHE_KEY_PREFIX}_${actionId}_*`)
+            for (const partitionCacheKey of allPartitionCacheKeys) {
+                await this.processBatchForConsumer(partitionCacheKey, actionId)
+            }
+        }
+    }
+
+    @Interval(5000) // Every 5 seconds
+    async checkAndRunLastBatches() {
+        console.log("Checking for left out batches to run")
+        const incompleteBulkActions = await this.bulkActionRepository.find({ where: { isCompleted: false } });
+        const actionIds = incompleteBulkActions.map(action => action.actionId)
+        for (const actionId of actionIds) {
+            this.queueLastBatchForAction(actionId)
+        }   
+    }
 
     async getBatchDetails(batchId: string) {
         const cacheKey = `${this.BATCH_CACHE_KEY_DETAILS_PREFIX}_${batchId}`
