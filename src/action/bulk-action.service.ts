@@ -114,26 +114,27 @@ export class BulkActionService {
             });
         });
 
-        // Append the id parameters for the IN clause
         records.forEach(record => {
             parameters.push(record[updateIdentifier]);
         });
 
         try {
-            const rawQuery = query.replace(/\$\d+/g, (match) => {
-                const index = parseInt(match.slice(1)) - 1;
-                return typeof parameters[index] === 'string' ? `'${parameters[index]}'` : parameters[index];
-            });
-            console.log('Raw SQL query:', rawQuery);
+            // const rawQuery = query.replace(/\$\d+/g, (match) => {
+            //     const index = parseInt(match.slice(1)) - 1;
+            //     return typeof parameters[index] === 'string' ? `'${parameters[index]}'` : parameters[index];
+            // });
+            // console.log('Raw SQL query:', rawQuery);
 
             const result = await this.entityManager.query(query, parameters);
-            console.log({ result: JSON.stringify(result) })
-            const updatedCount = result.filter(row => row.updated).length;
-            const skippedCount = result.length - updatedCount;
+            console.log({ result: JSON.stringify(result) });
+            
+            const updatedCount = result[0].length;
+            const skippedCount = records.length - updatedCount;
+            
             return {
                 updatedCount,
                 skippedCount,
-                failureCount: records.length - updatedCount - skippedCount
+                failureCount: 0 // All rows were processed without errors
             };
         } catch (error) {
             console.error('Bulk update failed:', error);
@@ -155,7 +156,6 @@ export class BulkActionService {
             const batchRecords = batchRecordsStringified.map(record => JSON.parse(record))
             const batchDetails = await this.getBatchDetails(message.actionId)
             const output = await this.bulkUpdateRecords(batchDetails.entity, batchRecords)
-            console.log({ output })
             await this.redisClient.del(cacheKey)
         }
     }
