@@ -51,6 +51,8 @@ export class BulkActionService {
         await this.bulkActionRepository.save(bulkAction);
 
         const messages = [];
+        let currentDateTime = new Date().toLocaleString();
+        console.log('Current Date and Time:', currentDateTime);
         for (const record of acitonDetails.records) {
             const dataToQueue = {
                 actionId,
@@ -69,6 +71,8 @@ export class BulkActionService {
         if (messages.length > 0) {
             await this.kafkaProducerService.sendMessage('bulk-action', messages);
         }
+        currentDateTime = new Date().toLocaleString();
+        console.log('Current Date and Time:', currentDateTime);
 
         return {
             message: "Bulk action created successfully",
@@ -79,41 +83,52 @@ export class BulkActionService {
     }
 
     async bulkUpdateRecords(entity: string, records: any[]) {
-        const updateIdentifier = 'email';
+        const updateIdentifier = 'id';
+        const updateFields = records.reduce((acc, record) => {
+            Object.keys(record).forEach(field => {
+                if (field !== updateIdentifier) {
+                    if (!acc[field]) {
+                        acc[field] = `CASE `;
+                    }
+                    acc[field] += `WHEN ${updateIdentifier} = $${acc.paramCount} THEN $${acc.paramCount + 1} `;
+                    acc.paramCount += 2;
+                }
+            });
+            return acc;
+        }, { paramCount: 1 });
 
-        // Prepare the case statements for each field
-        const updateFields = Object.keys(records[0])
-            .filter(key => key !== updateIdentifier)
-            .map(field => `
-                ${field} = CASE
-                    ${records.map(record => `
-                        WHEN ${updateIdentifier} = '${record[updateIdentifier]}' THEN '${record[field]}'
-                    `).join('')}
-                    ELSE ${field}
-                END
-            `).join(',');
+        const setClauses = Object.keys(updateFields)
+            .filter(key => key !== 'paramCount')
+            .map(field => `"${field}" = ${updateFields[field]} ELSE "${field}" END`);
 
-        // Prepare the values array for parameterized query
-        const values = records.flatMap(record => [
-            record[updateIdentifier],
-            ...Object.entries(record)
-                .filter(([key]) => key !== updateIdentifier)
-                .map(([, value]) => value)
-        ]);
+        const inClauseStart = updateFields.paramCount;
+        const query = `UPDATE "${entity}" SET ${setClauses.join(', ')} WHERE ${updateIdentifier} IN (${records.map((_, i) => `$${inClauseStart + i}`).join(', ')}) RETURNING ${updateIdentifier}, (xmax::text::int > 0) as updated`;
 
-        // Construct the SQL query
-        const query = `
-            UPDATE ${entity}
-            SET ${updateFields}
-            WHERE ${updateIdentifier} IN (${records.map(record => `'${record[updateIdentifier]}'`).join(',')})
-            RETURNING ${updateIdentifier}, 
-                (CASE WHEN xmax::text::int > 0 THEN 1 ELSE 0 END) as updated_count
-        `;
+        const parameters = [];
+        records.forEach(record => {
+            Object.keys(record).forEach(field => {
+                if (field !== updateIdentifier) {
+                    parameters.push(record[updateIdentifier]);
+                    parameters.push(record[field]);
+                }
+            });
+        });
+
+        // Append the id parameters for the IN clause
+        records.forEach(record => {
+            parameters.push(record[updateIdentifier]);
+        });
 
         try {
-            const result = await this.entityManager.query(query, values);
+            const rawQuery = query.replace(/\$\d+/g, (match) => {
+                const index = parseInt(match.slice(1)) - 1;
+                return typeof parameters[index] === 'string' ? `'${parameters[index]}'` : parameters[index];
+            });
+            console.log('Raw SQL query:', rawQuery);
 
-            const updatedCount = result.filter(row => row.updated_count === 1).length;
+            const result = await this.entityManager.query(query, parameters);
+            console.log({ result: JSON.stringify(result) })
+            const updatedCount = result.filter(row => row.updated).length;
             const skippedCount = result.length - updatedCount;
             return {
                 updatedCount,
@@ -139,8 +154,8 @@ export class BulkActionService {
             const batchRecordsStringified = await this.redisClient.lrange(cacheKey, 0, -1)
             const batchRecords = batchRecordsStringified.map(record => JSON.parse(record))
             const batchDetails = await this.getBatchDetails(message.actionId)
-            await this.bulkUpdateRecords(batchDetails.entity, batchRecords)
-            console.log({ batchRecords })
+            const output = await this.bulkUpdateRecords(batchDetails.entity, batchRecords)
+            console.log({ output })
             await this.redisClient.del(cacheKey)
         }
     }
