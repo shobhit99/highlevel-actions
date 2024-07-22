@@ -17,6 +17,7 @@ export class ClickhouseService {
     async fetchLogs(query: string) {
         return await this.clickhouseClient.query({
             query,
+            format: 'JSONEachRow'
         });
     }
 }

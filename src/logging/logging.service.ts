@@ -1,3 +1,4 @@
+import { Row } from '@clickhouse/client';
 import { Injectable } from '@nestjs/common';
 import { ClickhouseService } from 'src/clickhouse/clickhouse.service';
 
