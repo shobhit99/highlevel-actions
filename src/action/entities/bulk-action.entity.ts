@@ -29,7 +29,7 @@ export class BulkAction {
     actionType: string;
 
     @Column()
-    isCompleted: boolean;
+    status: string;
 
     @Column()
     entity: string;
@@ -53,10 +53,11 @@ CREATE TABLE bulk_action (
     is_scheduled BOOLEAN,
     scheduled_time TIMESTAMPTZ,
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-    is_completed BOOLEAN,
-    skipped_count INT,
-    failed_count INT,
-    success_count INT,
+    action_type VARCHAR(255),
+    status VARCHAR(255),
+    skipped_count INT default 0,
+    failed_count INT default 0,
+    success_count INT default 0,
     entity VARCHAR(255)
 );
 */

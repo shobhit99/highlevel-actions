@@ -1,8 +1,8 @@
-import { Inject, Injectable, UnauthorizedException } from '@nestjs/common';
+import { Inject, Injectable, NotFoundException, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { BulkAction } from './entities/bulk-action.entity';
-import { DataSource, EntityManager, Repository, getManager } from 'typeorm';
+import { DataSource, EntityManager, In, Repository, getManager } from 'typeorm';
 import { AccountService } from 'src/account/account.service';
 import { ICreateBulkAction } from './bulk-action.interface';
 import { v4 as uuidv4 } from 'uuid';
@@ -11,14 +11,15 @@ import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Cache } from 'cache-manager';
 import { Redis } from 'ioredis';
 import { Cron, Interval } from '@nestjs/schedule';
+import { BulkActionStatus } from './bulk-action.enum';
 
 @Injectable()
 export class BulkActionService {
     private readonly CONSUMER_BATCH_SIZE_UNTIL_PROCESSING = 10;
     private readonly PRODUCER_BATCH_SIZE = 100;
-    private readonly BATCH_CACHE_KEY_PREFIX = 'bulk_action_batch_';
-    private readonly BATCH_CACHE_KEY_DETAILS_PREFIX = 'bulk_action_batch_details_';
-    private readonly BATCH_STATS_PREFIX = 'bulk_action_stats_';
+    private readonly BATCH_CACHE_KEY_PREFIX = 'bulk_action_batch';
+    private readonly BULK_ACTION_CACHE_KEY_DETAILS_PREFIX = 'bulk_action_batch_details';
+    private readonly BATCH_STATS_PREFIX = 'bulk_action_stats';
     private readonly redisClient: Redis
     private readonly entityManager: EntityManager
 
@@ -46,8 +47,8 @@ export class BulkActionService {
             actionType: acitonDetails.action_type,
             actionId,
             account,
-            isCompleted: false,
-            isScheduled: false,
+            status: BulkActionStatus.PENDING,
+            isScheduled: acitonDetails.is_scheduled,
             entity: acitonDetails.entity,
             totalRecords: acitonDetails.records.length,
         });
@@ -74,6 +75,8 @@ export class BulkActionService {
         if (messages.length > 0) {
             await this.kafkaProducerService.sendMessage('bulk-action', messages);
         }
+        
+        await this.bulkActionRepository.update({ actionId }, { status: BulkActionStatus.IN_PROGRESS });
         currentDateTime = new Date().toLocaleString();
         console.log('Current Date and Time:', currentDateTime);
 
@@ -178,7 +181,9 @@ export class BulkActionService {
         const skippedRecords = batchDetails.skippedRecords
         if (stats.totalProcessed === totalRecords - (skippedRecords || 0)) {
             console.log(`Marking batch ${actionId} as completed`)
-            await this.bulkActionRepository.update({ actionId }, { isCompleted: true })
+            await this.bulkActionRepository.update({ actionId }, { status: BulkActionStatus.COMPLETED, failedCount: stats.failureCount, successCount: stats.updatedCount })
+            this.redisClient.del(`${this.BULK_ACTION_CACHE_KEY_DETAILS_PREFIX}_${actionId}`)
+            this.redisClient.del(`${this.BATCH_STATS_PREFIX}_${actionId}`)
         }
     }
 
@@ -217,27 +222,56 @@ export class BulkActionService {
     @Interval(5000) // Every 5 seconds
     async checkAndRunLastBatches() {
         console.log("Checking for left out batches to run")
-        const incompleteBulkActions = await this.bulkActionRepository.find({ where: { isCompleted: false } });
+        const incompleteBulkActions = await this.bulkActionRepository.find({ where: { status: In([BulkActionStatus.PENDING, BulkActionStatus.IN_PROGRESS]) } });
         const actionIds = incompleteBulkActions.map(action => action.actionId)
         for (const actionId of actionIds) {
             this.queueLastBatchForAction(actionId)
         }   
     }
 
-    async getBatchDetails(batchId: string) {
-        const cacheKey = `${this.BATCH_CACHE_KEY_DETAILS_PREFIX}_${batchId}`
+    async getBatchDetails(actionId: string) {
+        // get bulk action details from cache else fetch from db and set in cache
+
+        const cacheKey = `${this.BULK_ACTION_CACHE_KEY_DETAILS_PREFIX}_${actionId}`
         let bulkAction: any = await this.redisClient.get(cacheKey)
 
         if (bulkAction) {
             return JSON.parse(bulkAction)
         }
 
-        bulkAction = await this.bulkActionRepository.findOne({ where: { actionId: batchId } });
+        bulkAction = await this.bulkActionRepository.findOne({ where: { actionId: actionId } });
         await this.redisClient.set(cacheKey, JSON.stringify(bulkAction))
         return bulkAction;
     }
 
-    async getBulkActions(accountId: number) {
-        return this.bulkActionRepository.find({ where: { account: { id: accountId } } });
+    async getBulkActions() {
+        return this.bulkActionRepository.find();
+    }
+
+    async getBulkActionByActionId(actionId: string) {
+        return this.bulkActionRepository.findOne({ where: { actionId } });
+    }
+
+    async getBulkActionStatsById(actionId: string) {
+        let bulkAction = await this.getBulkActionByActionId(actionId);
+        if (!bulkAction) {
+            throw new NotFoundException('Bulk action not found');
+        }
+        if (bulkAction.status === BulkActionStatus.COMPLETED) {
+            return {
+                actionId,
+                skippedRecords: bulkAction.skippedCount,
+                updatedRecords: bulkAction.successCount,
+                failedRecords: bulkAction.failedCount
+            }
+        } else {
+            const bulkActionCachedStats = await this.getBulkActionStats(bulkAction.actionId);
+            return {
+                actionId,
+                skippedRecords: bulkActionCachedStats.skippedCount,
+                updatedRecords: bulkActionCachedStats.updatedCount,
+                failedRecords: bulkActionCachedStats.failureCount
+            }
+        }
     }
 }

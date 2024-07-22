@@ -1,4 +1,4 @@
-import { Body, Controller, Post } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post } from '@nestjs/common';
 import { BulkActionService } from './bulk-action.service';
 import { ICreateBulkAction } from './bulk-action.interface';
 
@@ -9,5 +9,20 @@ export class BulkActionController {
     @Post('/')
     createBulkAction(@Body() createBulkAction: ICreateBulkAction) {
         return this.bulkActionService.createBulkAction(createBulkAction);
+    }
+
+    @Get('/')
+    getBulkActions() {
+        return this.bulkActionService.getBulkActions();
+    }
+
+    @Get('/:actionId')
+    getBulkAction(@Param('actionId') actionId: string) {
+        return this.bulkActionService.getBulkActionByActionId(actionId);
+    }
+
+    @Get('/:actionId/stats')
+    getBulkActionStats(@Param('actionId') actionId: string) {
+        return this.bulkActionService.getBulkActionStats(actionId);
     }
 }
