@@ -30,4 +30,13 @@ export class LoggingService {
         status: 'skipped'
     })));
   }
+
+  async writeFailedRecords(records: any[], actionId: string) {
+    await this.clickhouseService.writeLog(records.map((record) => ({
+        action_id: actionId,
+        created_at: new Date().toISOString(),
+        identifier: record.email || "", // optimize this
+        status: 'failed'
+    })));
+  }
 }

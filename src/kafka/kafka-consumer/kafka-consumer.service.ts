@@ -52,8 +52,4 @@ export class KafkaConsumerService implements OnModuleInit, OnApplicationShutdown
       console.error('Error disconnecting from Kafka:', error);
     }
   }
-
-  // async consume(topic: string, fromBeginning: boolean = true) {
-  //   await this.consumer.subscribe({ topic, fromBeginning });
-  // }
 }

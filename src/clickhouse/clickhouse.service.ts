@@ -7,7 +7,7 @@ export class ClickhouseService {
     constructor(@InjectClickHouse() private readonly clickhouseClient: ClickHouseClient) {}
 
     async writeLog(logs: any) {
-        const result = await this.clickhouseClient.insert({
+        await this.clickhouseClient.insert({
             table: 'Logs',
             values: [logs],
             format: 'JSONEachRow'

@@ -143,12 +143,6 @@ export class BulkActionService {
         });
 
         try {
-            // const rawQuery = query.replace(/\$\d+/g, (match) => {
-            //     const index = parseInt(match.slice(1)) - 1;
-            //     return typeof parameters[index] === 'string' ? `'${parameters[index]}'` : parameters[index];
-            // });
-            // console.log('Raw SQL query:', rawQuery);
-
             const result = await this.entityManager.query(query, parameters);
             console.log({ result: JSON.stringify(result) });
             
@@ -212,6 +206,9 @@ export class BulkActionService {
             console.log(`Processing batch for ${actionId} - count ${batchRecords.length}`)
             const batchDetails = await this.getBatchDetails(actionId)
             const output = await this.bulkUpdateRecords(batchDetails.entity, batchRecords)
+            if (output.failureCount) {
+                await this.loggingService.writeFailedRecords(batchRecords, actionId)
+            }
             const stats = await this.getBulkActionStats(actionId)
             const updatedStats = {
                 updatedCount: stats.updatedCount + output.updatedCount,
