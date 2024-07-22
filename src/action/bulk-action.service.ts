@@ -95,14 +95,12 @@ export class BulkActionService {
         const jsonFilePath = `${bulkAction.actionId}.json`;
         const jsonData = JSON.stringify(records)
         try {
-            const { url } = await this.supabaseService.uploadFileAndGetPresignedUrl(jsonFilePath, jsonData);
-            console.log("Uploaded file to supabase", url)
-            const fileUrl = url; // this ideally should be a presigned url with private bucket
+            const { url } = await this.supabaseService.uploadFileAndGetPresignedUrl(jsonFilePath, jsonData, scheduledDate);
 
             const job = new CronJob(new Date(scheduledDate), async () => {
                 console.log("Running scheduled job for actionId", bulkAction.actionId)
-                console.log("Fetching file from supabase", fileUrl)
-                const response = await fetch(fileUrl);
+                console.log("Fetching file from supabase", url)
+                const response = await fetch(url);
                 const records = await response.json();
                 await this.pushRecordsToKafka(records, bulkAction.actionId, bulkAction.account.id);
             });

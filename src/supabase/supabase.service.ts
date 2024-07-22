@@ -13,7 +13,7 @@ export class SupabaseService {
         this.client = createClient(supabaseUrl, supabaseAnonKey);
     }
 
-    async uploadFileAndGetPresignedUrl(path: string, contents: string) {
+    async uploadFileAndGetPresignedUrl(path: string, contents: string, scheduledDate: string) {
         const { data: uploadData, error: uploadError } = await this.client.storage
             .from('bulk-action-records')
             .upload(path, Buffer.from(contents), { contentType: 'application/json', upsert: true });
@@ -24,7 +24,7 @@ export class SupabaseService {
 
         const { data: urlData, error: urlError } = await this.client.storage
             .from('bulk-action-records')
-            .createSignedUrl(path, 3600); // URL valid for 1 hour
+            .createSignedUrl(path, Math.floor((new Date(scheduledDate).getTime() - Date.now()) / 1000) + 600); // URL valid until scheduled time + 10 minutes
 
         if (urlError) {
             throw new Error(`Error creating signed URL: ${urlError.message}`);
