@@ -6,7 +6,7 @@ import { BulkActionService } from 'src/action/bulk-action.service';
 
 @Injectable()
 export class KafkaConsumerService implements OnModuleInit, OnApplicationShutdown {
-  private readonly TOTAL_CONSUMERS = 6;
+  private readonly TOTAL_CONSUMERS = 1;
 
   constructor(
     private readonly configService: ConfigService,

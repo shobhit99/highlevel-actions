@@ -8,9 +8,10 @@ import { AccountModule } from 'src/account/account.module';
 import { KafkaModule } from 'src/kafka/kafka.module';
 import { LoggingModule } from 'src/logging/logging.module';
 import { SupabaseModule } from 'src/supabase/supabase.module';
+import { PusherModule } from 'src/pusher/pusher.module';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([BulkAction]), AccountModule, KafkaModule, LoggingModule, SupabaseModule],
+  imports: [TypeOrmModule.forFeature([BulkAction]), AccountModule, KafkaModule, LoggingModule, SupabaseModule, PusherModule],
   providers: [BulkActionService],
   exports: [BulkActionService],
   controllers: [BulkActionController]

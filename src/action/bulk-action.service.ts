@@ -13,6 +13,7 @@ import { BulkActionStatus } from './bulk-action.enum';
 import { LoggingService } from 'src/logging/logging.service';
 import { CronJob } from 'cron';
 import { SupabaseService } from 'src/supabase/supabase.service';
+import { PusherService } from 'src/pusher/pusher.service';
 
 @Injectable()
 export class BulkActionService {
@@ -31,7 +32,8 @@ export class BulkActionService {
         private readonly kafkaProducerService: KafkaProducerService,
         private readonly dataSource: DataSource,
         private readonly loggingService: LoggingService,
-        private readonly supabaseService: SupabaseService
+        private readonly supabaseService: SupabaseService,
+        private readonly pusherService: PusherService
     ) {
         this.redisClient = new Redis(this.configService.get<string>('REDIS_CONNECTION_STRING'));
         this.entityManager = this.dataSource.createEntityManager();
@@ -59,6 +61,11 @@ export class BulkActionService {
             skippedCount: skippedRecords.length
         });
         await this.bulkActionRepository.save(bulkAction);
+
+        // this should ideally go in the entity subscriber
+        this.pusherService.trigger("bulk-action", 'new-bulk-action', {
+            bulkAction
+        })
 
         if (bulkAction.isScheduled) {
             return this.scheduleBulkAction(bulkAction, uniqueRecords)
@@ -106,6 +113,12 @@ export class BulkActionService {
             });
             job.start();
             this.bulkActionRepository.update({ actionId: bulkAction.actionId }, { status: BulkActionStatus.SCHEDULED });
+            this.pusherService.trigger("bulk-action", 'bulk-action-scheduled', {
+                bulkAction: {
+                    ...bulkAction,
+                    status: BulkActionStatus.SCHEDULED
+                }
+            })
             return {
                 message: "Bulk action scheduled successfully",
                 data: {
@@ -223,12 +236,20 @@ export class BulkActionService {
 
     private async checkAndMarkBatchAsCompleted(actionId: string) {
         const stats = await this.getBulkActionStats(actionId)
-        const batchDetails = await this.getBatchDetails(actionId)
-        const totalRecords = batchDetails.totalRecords
-        const skippedCount = batchDetails.skippedCount
+        const bulkActionDetails = await this.getBulkActionDetails(actionId)
+        const totalRecords = bulkActionDetails.totalRecords
+        const skippedCount = bulkActionDetails.skippedCount
         if (stats.totalProcessed === totalRecords - (skippedCount || 0)) {
             console.log(`Marking batch ${actionId} as complete at ${new Date().toLocaleString()}`);
             await this.bulkActionRepository.update({ actionId }, { status: BulkActionStatus.COMPLETED, failedCount: stats.failureCount, successCount: stats.updatedCount })
+            this.pusherService.trigger("bulk-action", 'bulk-action-updated', {
+                bulkAction: {
+                    ...bulkActionDetails,
+                    status: BulkActionStatus.COMPLETED,
+                    failedCount: stats.failureCount,
+                    successCount: stats.updatedCount
+                }
+            })
             this.redisClient.del(`${this.BULK_ACTION_CACHE_KEY_DETAILS_PREFIX}_${actionId}`)
             this.redisClient.del(`${this.BATCH_STATS_PREFIX}_${actionId}`)
         }
@@ -239,8 +260,8 @@ export class BulkActionService {
         const batchRecords = batchRecordsStringified.map(record => JSON.parse(record))
         if (batchRecords.length) {
             console.log(`Processing batch for ${actionId} ${partitionCacheKey} - count ${batchRecords.length}`)
-            const batchDetails = await this.getBatchDetails(actionId)
-            const output = await this.bulkUpdateRecords(batchDetails.entity, batchRecords)
+            const bulkActionDetails = await this.getBulkActionDetails(actionId)
+            const output = await this.bulkUpdateRecords(bulkActionDetails.entity, batchRecords)
             if (output.failureCount) {
                 await this.loggingService.writeFailedRecords(batchRecords, actionId)
             }
@@ -258,6 +279,14 @@ export class BulkActionService {
                             lastProcesssedTime: Math.floor(Date.now() / 1000),
                             batchId: actionId
                         };
+                        this.pusherService.trigger("bulk-action", 'bulk-action-updated', {
+                            bulkAction: {
+                                ...bulkActionDetails,
+                                status: BulkActionStatus.IN_PROGRESS,
+                                failedCount: stats.failureCount + output.failureCount,
+                                successCount: stats.updatedCount + output.updatedCount
+                            }
+                        })
                         await this.setBulkActionStats(actionId, updatedStats);
                     } finally {
                         await this.redisClient.del(lockKey);
@@ -299,7 +328,7 @@ export class BulkActionService {
         }   
     }
 
-    async getBatchDetails(actionId: string) {
+    async getBulkActionDetails(actionId: string) {
         // get bulk action details from cache else fetch from db and set in cache
 
         const cacheKey = `${this.BULK_ACTION_CACHE_KEY_DETAILS_PREFIX}_${actionId}`
@@ -327,8 +356,9 @@ export class BulkActionService {
         if (!bulkAction) {
             throw new NotFoundException('Bulk action not found');
         }
+        let statsToReturn: any = {}
         if (bulkAction.status === BulkActionStatus.COMPLETED) {
-            return {
+            statsToReturn = {
                 actionId,
                 skippedRecords: bulkAction.skippedCount,
                 updatedRecords: bulkAction.successCount,
@@ -337,7 +367,7 @@ export class BulkActionService {
             }
         } else {
             const bulkActionCachedStats = await this.getBulkActionStats(bulkAction.actionId);
-            return {
+            statsToReturn = {
                 actionId,
                 skippedRecords: bulkAction.skippedCount,
                 updatedRecords: bulkActionCachedStats.updatedCount,
@@ -345,5 +375,14 @@ export class BulkActionService {
                 totalRecords: bulkAction.totalRecords
             }
         }
+        this.pusherService.trigger("bulk-action", 'bulk-action-updated', {
+            bulkAction: {
+                ...bulkAction,
+                successCount: statsToReturn.updatedRecords,
+                failedCount: statsToReturn.failedRecords,
+                skippedCount: statsToReturn.skippedRecords
+            }
+        })
+        return statsToReturn
     }
 }

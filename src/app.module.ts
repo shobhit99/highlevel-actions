@@ -12,6 +12,7 @@ import { ClickHouseModule } from '@md03/nestjs-clickhouse';
 import { ClickhouseModule } from './clickhouse/clickhouse.module';
 import { LoggingModule } from './logging/logging.module';
 import { SupabaseModule } from './supabase/supabase.module';
+import { PusherModule } from './pusher/pusher.module';
 
 @Module({
   imports: [
@@ -40,7 +41,7 @@ import { SupabaseModule } from './supabase/supabase.module';
       },
       inject: [ConfigService],
     }),
-    BulkActionModule, KafkaModule, AccountModule, ClickhouseModule, LoggingModule, SupabaseModule],
+    BulkActionModule, KafkaModule, AccountModule, ClickhouseModule, LoggingModule, SupabaseModule, PusherModule],
   controllers: [AppController],
   providers: [AppService],
 })
