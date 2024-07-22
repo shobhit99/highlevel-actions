@@ -6,11 +6,15 @@ import { BulkActionService } from 'src/action/bulk-action.service';
 
 @Injectable()
 export class KafkaConsumerService implements OnModuleInit, OnApplicationShutdown {
+  private readonly TOTAL_CONSUMERS = 6;
+
   constructor(
     private readonly configService: ConfigService,
     @Inject(forwardRef(() => BulkActionService))
     private readonly bulkActionService: BulkActionService
   ) {}
+
+  private readonly consumers = [];
 
   private readonly kafka = new Kafka({
     brokers: this.configService.get('KAFKA_BROKERS').split(','),
@@ -22,32 +26,32 @@ export class KafkaConsumerService implements OnModuleInit, OnApplicationShutdown
     },
   });
 
-  private readonly consumer: Consumer = this.kafka.consumer({ groupId: 'my-group-2', maxWaitTimeInMs: 10000 });
-
   async onModuleInit() {
     try {
-      await this.consumer.connect();
-      await this.subscribeToBulkAction();
+      const numberOfConsumers = this.TOTAL_CONSUMERS;
+      for (let i = 0; i < numberOfConsumers; i++) {
+        const consumer = this.kafka.consumer({ groupId: `my-group-2`, maxWaitTimeInMs: 10000 });
+        await consumer.connect();
+        this.consumers.push(consumer);
+        await consumer.subscribe({ topic: 'bulk-action', fromBeginning: false });
+        await consumer.run({
+          eachBatchAutoResolve: true,
+          eachMessage: async ({ message, heartbeat, partition }) => {
+            await this.bulkActionService.bulkActionConsumer(message.value.toString(), partition);
+            await heartbeat();
+          }
+        });
+      }
     } catch (error) {
       console.error('Error connecting to Kafka:', error);
     }
   }
 
-  private async subscribeToBulkAction() {
-    await this.consumer.subscribe({ topic: 'bulk-action', fromBeginning: false });
-
-    await this.consumer.run({
-      eachBatchAutoResolve: true,
-      eachMessage: async ({ message, heartbeat, partition }) => {
-        await this.bulkActionService.bulkActionConsumer(message.value.toString(), partition);
-        await heartbeat();
-      }
-    });
-  }
-
   async onApplicationShutdown() {
     try {
-      await this.consumer.disconnect();
+      for (const consumer of this.consumers) {
+        await consumer.disconnect();
+      }
     } catch (error) {
       console.error('Error disconnecting from Kafka:', error);
     }

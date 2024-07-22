@@ -13,9 +13,9 @@ export class LoggingService {
     return await this.clickhouseService.fetchLogs(query);
   }
 
-  async writeQueuedLogs(messages: any[]) {
+  async writeQueuedLogs(actionId: string, messages: any[]) {
     await this.clickhouseService.writeLog(messages.map((message) => ({
-        action_id: message.key,
+        action_id: actionId,
         created_at: new Date().toISOString(),
         identifier: JSON.parse(message.value)?.record?.email || "", // optimize this
         status: 'queued'

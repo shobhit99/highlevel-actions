@@ -16,8 +16,8 @@ import { SupabaseService } from 'src/supabase/supabase.service';
 
 @Injectable()
 export class BulkActionService {
-    private readonly CONSUMER_BATCH_SIZE_UNTIL_PROCESSING = 10;
-    private readonly PRODUCER_BATCH_SIZE = 100;
+    private readonly CONSUMER_BATCH_SIZE_UNTIL_PROCESSING = 100;
+    private readonly PRODUCER_BATCH_SIZE = 200;
     private readonly BATCH_CACHE_KEY_PREFIX = 'bulk_action_batch';
     private readonly BULK_ACTION_CACHE_KEY_DETAILS_PREFIX = 'bulk_action_batch_details';
     private readonly BATCH_STATS_PREFIX = 'bulk_action_stats';
@@ -125,18 +125,18 @@ export class BulkActionService {
                 accountId: account.id,
                 record
             };
-            messages.push({ key: actionId, value: JSON.stringify(dataToQueue) });
+            messages.push({ value: JSON.stringify(dataToQueue) });
 
             if (messages.length === this.PRODUCER_BATCH_SIZE) {
                 await this.kafkaProducerService.sendMessage('bulk-action', messages);
-                this.loggingService.writeQueuedLogs(messages);
+                this.loggingService.writeQueuedLogs(actionId, messages);
                 messages.length = 0; // Clear the array for the next batch
             }
         }
         // Send any remaining messages after the loop
         if (messages.length > 0) {
             await this.kafkaProducerService.sendMessage('bulk-action', messages);
-            this.loggingService.writeQueuedLogs(messages);
+            this.loggingService.writeQueuedLogs(actionId, messages);
         }
 
         // records are pushed to kafka, so it is safe to mark the bulk action as in progress
@@ -181,7 +181,6 @@ export class BulkActionService {
 
         try {
             const result = await this.entityManager.query(query, parameters);
-            console.log({ result: JSON.stringify(result) });
             
             const updatedCount = result[0].length;
             const skippedCount = records.length - updatedCount;
@@ -228,7 +227,7 @@ export class BulkActionService {
         const totalRecords = batchDetails.totalRecords
         const skippedCount = batchDetails.skippedCount
         if (stats.totalProcessed === totalRecords - (skippedCount || 0)) {
-            console.log(`Marking batch ${actionId} as completed`)
+            console.log(`Marking batch ${actionId} as complete at ${new Date().toLocaleString()}`);
             await this.bulkActionRepository.update({ actionId }, { status: BulkActionStatus.COMPLETED, failedCount: stats.failureCount, successCount: stats.updatedCount })
             this.redisClient.del(`${this.BULK_ACTION_CACHE_KEY_DETAILS_PREFIX}_${actionId}`)
             this.redisClient.del(`${this.BATCH_STATS_PREFIX}_${actionId}`)
@@ -239,21 +238,41 @@ export class BulkActionService {
         const batchRecordsStringified = await this.redisClient.lrange(partitionCacheKey, 0, -1)
         const batchRecords = batchRecordsStringified.map(record => JSON.parse(record))
         if (batchRecords.length) {
-            console.log(`Processing batch for ${actionId} - count ${batchRecords.length}`)
+            console.log(`Processing batch for ${actionId} ${partitionCacheKey} - count ${batchRecords.length}`)
             const batchDetails = await this.getBatchDetails(actionId)
             const output = await this.bulkUpdateRecords(batchDetails.entity, batchRecords)
             if (output.failureCount) {
                 await this.loggingService.writeFailedRecords(batchRecords, actionId)
             }
-            const stats = await this.getBulkActionStats(actionId)
-            const updatedStats = {
-                updatedCount: stats.updatedCount + output.updatedCount,
-                failureCount: stats.failureCount + output.failureCount,
-                totalProcessed: stats.totalProcessed + batchRecords.length,
-                lastProcesssedTime: Math.floor(Date.now() / 1000),
-                batchId: actionId
-            }
-            await this.setBulkActionStats(actionId, updatedStats)
+            const lockKey = `lock_${actionId}`;
+            const acquireLock = async (retryCount = 0) => {
+                // @ts-ignore
+                const acquired = await this.redisClient.set(lockKey, 'locked', 'NX', 'PX', 10000); // Lock for 10 seconds
+                if (acquired) {
+                    try {
+                        const stats = await this.getBulkActionStats(actionId);
+                        const updatedStats = {
+                            updatedCount: stats.updatedCount + output.updatedCount,
+                            failureCount: stats.failureCount + output.failureCount,
+                            totalProcessed: stats.totalProcessed + batchRecords.length,
+                            lastProcesssedTime: Math.floor(Date.now() / 1000),
+                            batchId: actionId
+                        };
+                        await this.setBulkActionStats(actionId, updatedStats);
+                    } finally {
+                        await this.redisClient.del(lockKey);
+                    }
+                } else {
+                    if (retryCount < 5) {
+                        const delay = Math.pow(2, retryCount) * 100; // Exponential backoff
+                        await new Promise(resolve => setTimeout(resolve, delay));
+                        await acquireLock(retryCount + 1);
+                    } else {
+                        throw new Error('Failed to acquire lock after multiple attempts');
+                    }
+                }
+            };
+            await acquireLock();
             await this.redisClient.del(partitionCacheKey)
             this.checkAndMarkBatchAsCompleted(actionId)
         }
