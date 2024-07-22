@@ -7,26 +7,22 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule, TypeOrmModuleOptions } from '@nestjs/typeorm';
 import { SnakeNamingStrategy } from 'typeorm-naming-strategies';
 import { AccountModule } from './account/account.module';
-import { CacheModule } from '@nestjs/cache-manager';
-import { redisStore } from 'cache-manager-redis-yet';
 import { ScheduleModule } from '@nestjs/schedule';
+import { ClickHouseModule } from '@md03/nestjs-clickhouse';
+import { ClickhouseModule } from './clickhouse/clickhouse.module';
+import { LoggingModule } from './logging/logging.module';
 
 @Module({
   imports: [
-    // CacheModule.registerAsync({
-    //   isGlobal: true,
-    //   useFactory: async (configService: ConfigService) => ({
-    //     store: await redisStore({
-    //       socket: {
-    //         host: configService.get<string>('REDIS_HOST'),
-    //         port: configService.get<number>('REDIS_PORT'),
-    //       },
-    //       password: configService.get<string>('REDIS_PASSWORD'),
-    //     }),
-    //   }),
-    //   inject: [ConfigService],
-    // }),
     ScheduleModule.forRoot(),
+    ClickHouseModule.forRootAsync({
+      useFactory: (configService: ConfigService) => ({
+        host: configService.get<string>('CLICKHOUSE_HOST'),
+        username: configService.get<string>('CLICKHOUSE_USERNAME'),
+        password: configService.get<string>('CLICKHOUSE_PASSWORD'),
+      }),
+      inject: [ConfigService],
+    }),
     ConfigModule.forRoot({ isGlobal: true }),
     TypeOrmModule.forRootAsync({
       useFactory: (configService: ConfigService) => {
@@ -43,7 +39,7 @@ import { ScheduleModule } from '@nestjs/schedule';
       },
       inject: [ConfigService],
     }),
-    BulkActionModule, KafkaModule, AccountModule],
+    BulkActionModule, KafkaModule, AccountModule, ClickhouseModule, LoggingModule],
   controllers: [AppController],
   providers: [AppService],
 })

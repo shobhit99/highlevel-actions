@@ -1,17 +1,16 @@
-import { Inject, Injectable, NotFoundException, UnauthorizedException } from '@nestjs/common';
+import { Injectable, NotFoundException, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { BulkAction } from './entities/bulk-action.entity';
-import { DataSource, EntityManager, In, Repository, getManager } from 'typeorm';
+import { DataSource, EntityManager, In, Repository } from 'typeorm';
 import { AccountService } from 'src/account/account.service';
 import { ICreateBulkAction } from './bulk-action.interface';
 import { v4 as uuidv4 } from 'uuid';
 import { KafkaProducerService } from 'src/kafka/kafka-producer/kafka-producer.service';
-import { CACHE_MANAGER } from '@nestjs/cache-manager';
-import { Cache } from 'cache-manager';
 import { Redis } from 'ioredis';
-import { Cron, Interval } from '@nestjs/schedule';
+import { Interval } from '@nestjs/schedule';
 import { BulkActionStatus } from './bulk-action.enum';
+import { LoggingService } from 'src/logging/logging.service';
 
 @Injectable()
 export class BulkActionService {
@@ -28,7 +27,8 @@ export class BulkActionService {
         private readonly bulkActionRepository: Repository<BulkAction>,
         private readonly accountService: AccountService,
         private readonly kafkaProducerService: KafkaProducerService,
-        private readonly dataSource: DataSource
+        private readonly dataSource: DataSource,
+        private readonly loggingService: LoggingService
     ) {
         this.redisClient = new Redis(this.configService.get<string>('REDIS_CONNECTION_STRING'));
         this.entityManager = this.dataSource.createEntityManager();
@@ -42,6 +42,7 @@ export class BulkActionService {
         }
 
         const actionId = uuidv4();
+        const {uniqueRecords, skippedRecords} = this.deDuplicateRecords(acitonDetails.records, actionId)
 
         const bulkAction = this.bulkActionRepository.create({
             actionType: acitonDetails.action_type,
@@ -51,34 +52,12 @@ export class BulkActionService {
             isScheduled: acitonDetails.is_scheduled,
             entity: acitonDetails.entity,
             totalRecords: acitonDetails.records.length,
+            skippedCount: skippedRecords.length
         });
         await this.bulkActionRepository.save(bulkAction);
-
-        const messages = [];
-        let currentDateTime = new Date().toLocaleString();
-        console.log('Current Date and Time:', currentDateTime);
-        for (const record of acitonDetails.records) {
-            const dataToQueue = {
-                actionId,
-                accountId: account.id,
-                record
-            };
-            messages.push({ key: actionId, value: JSON.stringify(dataToQueue) });
-
-            // Send messages in batches of 100
-            if (messages.length === this.PRODUCER_BATCH_SIZE) {
-                await this.kafkaProducerService.sendMessage('bulk-action', messages);
-                messages.length = 0; // Clear the array for the next batch
-            }
-        }
-        // Send any remaining messages after the loop
-        if (messages.length > 0) {
-            await this.kafkaProducerService.sendMessage('bulk-action', messages);
-        }
         
+        this.pushRecordsToKafka(uniqueRecords, actionId, account);
         await this.bulkActionRepository.update({ actionId }, { status: BulkActionStatus.IN_PROGRESS });
-        currentDateTime = new Date().toLocaleString();
-        console.log('Current Date and Time:', currentDateTime);
 
         return {
             message: "Bulk action created successfully",
@@ -86,6 +65,45 @@ export class BulkActionService {
                 actionId
             }
         };
+    }
+
+    private deDuplicateRecords(records, actionId) {
+        const recordsMapper = {}
+        const uniqueRecords = []
+        const skippedRecords = []
+        for (const record of records) {
+            if (!recordsMapper[record.email]) {
+                recordsMapper[record.email] = true
+                uniqueRecords.push(record)
+            } else {
+                skippedRecords.push(record)
+            }
+        }
+        this.loggingService.writeSkippedRecords(skippedRecords, actionId)
+        return { uniqueRecords, skippedRecords }
+    }
+
+    async pushRecordsToKafka(records, actionId, account) {
+        const messages = [];
+        for (const record of records) {
+            const dataToQueue = {
+                actionId,
+                accountId: account.id,
+                record
+            };
+            messages.push({ key: actionId, value: JSON.stringify(dataToQueue) });
+
+            if (messages.length === this.PRODUCER_BATCH_SIZE) {
+                await this.kafkaProducerService.sendMessage('bulk-action', messages);
+                this.loggingService.writeQueuedLogs(messages);
+                messages.length = 0; // Clear the array for the next batch
+            }
+        }
+        // Send any remaining messages after the loop
+        if (messages.length > 0) {
+            await this.kafkaProducerService.sendMessage('bulk-action', messages);
+            this.loggingService.writeQueuedLogs(messages);
+        }
     }
 
     async bulkUpdateRecords(entity: string, records: any[]) {
@@ -178,8 +196,8 @@ export class BulkActionService {
         const stats = await this.getBulkActionStats(actionId)
         const batchDetails = await this.getBatchDetails(actionId)
         const totalRecords = batchDetails.totalRecords
-        const skippedRecords = batchDetails.skippedRecords
-        if (stats.totalProcessed === totalRecords - (skippedRecords || 0)) {
+        const skippedCount = batchDetails.skippedCount
+        if (stats.totalProcessed === totalRecords - (skippedCount || 0)) {
             console.log(`Marking batch ${actionId} as completed`)
             await this.bulkActionRepository.update({ actionId }, { status: BulkActionStatus.COMPLETED, failedCount: stats.failureCount, successCount: stats.updatedCount })
             this.redisClient.del(`${this.BULK_ACTION_CACHE_KEY_DETAILS_PREFIX}_${actionId}`)
@@ -263,13 +281,13 @@ export class BulkActionService {
                 skippedRecords: bulkAction.skippedCount,
                 updatedRecords: bulkAction.successCount,
                 failedRecords: bulkAction.failedCount,
-                totalRecords: bulkAction.totalRecords
+                totalRecords: bulkAction.totalRecords,
             }
         } else {
             const bulkActionCachedStats = await this.getBulkActionStats(bulkAction.actionId);
             return {
                 actionId,
-                skippedRecords: bulkActionCachedStats.skippedCount,
+                skippedRecords: bulkAction.skippedCount,
                 updatedRecords: bulkActionCachedStats.updatedCount,
                 failedRecords: bulkActionCachedStats.failureCount,
                 totalRecords: bulkAction.totalRecords

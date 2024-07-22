@@ -23,6 +23,6 @@ export class BulkActionController {
 
     @Get('/:actionId/stats')
     getBulkActionStats(@Param('actionId') actionId: string) {
-        return this.bulkActionService.getBulkActionStats(actionId);
+        return this.bulkActionService.getBulkActionStatsById(actionId);
     }
 }
