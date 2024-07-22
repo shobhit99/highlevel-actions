@@ -11,6 +11,8 @@ import { Redis } from 'ioredis';
 import { Interval } from '@nestjs/schedule';
 import { BulkActionStatus } from './bulk-action.enum';
 import { LoggingService } from 'src/logging/logging.service';
+import { CronJob } from 'cron';
+import { SupabaseService } from 'src/supabase/supabase.service';
 
 @Injectable()
 export class BulkActionService {
@@ -28,7 +30,8 @@ export class BulkActionService {
         private readonly accountService: AccountService,
         private readonly kafkaProducerService: KafkaProducerService,
         private readonly dataSource: DataSource,
-        private readonly loggingService: LoggingService
+        private readonly loggingService: LoggingService,
+        private readonly supabaseService: SupabaseService
     ) {
         this.redisClient = new Redis(this.configService.get<string>('REDIS_CONNECTION_STRING'));
         this.entityManager = this.dataSource.createEntityManager();
@@ -50,14 +53,18 @@ export class BulkActionService {
             account,
             status: BulkActionStatus.PENDING,
             isScheduled: acitonDetails.is_scheduled,
+            scheduledTime: acitonDetails.scheduled_time,
             entity: acitonDetails.entity,
             totalRecords: acitonDetails.records.length,
             skippedCount: skippedRecords.length
         });
         await this.bulkActionRepository.save(bulkAction);
+
+        if (bulkAction.isScheduled) {
+            return this.scheduleBulkAction(bulkAction, uniqueRecords)
+        }
         
         this.pushRecordsToKafka(uniqueRecords, actionId, account);
-        await this.bulkActionRepository.update({ actionId }, { status: BulkActionStatus.IN_PROGRESS });
 
         return {
             message: "Bulk action created successfully",
@@ -83,6 +90,35 @@ export class BulkActionService {
         return { uniqueRecords, skippedRecords }
     }
 
+    private async scheduleBulkAction(bulkAction: BulkAction, records: any[]) {
+        const scheduledDate = bulkAction.scheduledTime;
+        const jsonFilePath = `${bulkAction.actionId}.json`;
+        const jsonData = JSON.stringify(records)
+        try {
+            const { url } = await this.supabaseService.uploadFileAndGetPresignedUrl(jsonFilePath, jsonData);
+            console.log("Uploaded file to supabase", url)
+            const fileUrl = url; // this ideally should be a presigned url with private bucket
+
+            const job = new CronJob(new Date(scheduledDate), async () => {
+                console.log("Running scheduled job for actionId", bulkAction.actionId)
+                console.log("Fetching file from supabase", fileUrl)
+                const response = await fetch(fileUrl);
+                const records = await response.json();
+                await this.pushRecordsToKafka(records, bulkAction.actionId, bulkAction.account.id);
+            });
+            job.start();
+            this.bulkActionRepository.update({ actionId: bulkAction.actionId }, { status: BulkActionStatus.SCHEDULED });
+            return {
+                message: "Bulk action scheduled successfully",
+                data: {
+                    actionId: bulkAction.actionId
+                }
+            }
+        } catch (error) {
+            throw new Error('Error scheduling bulk action: ' + error.message);
+        }
+    }
+
     async pushRecordsToKafka(records, actionId, account) {
         const messages = [];
         for (const record of records) {
@@ -104,6 +140,9 @@ export class BulkActionService {
             await this.kafkaProducerService.sendMessage('bulk-action', messages);
             this.loggingService.writeQueuedLogs(messages);
         }
+
+        // records are pushed to kafka, so it is safe to mark the bulk action as in progress
+        await this.bulkActionRepository.update({ actionId }, { status: BulkActionStatus.IN_PROGRESS });
     }
 
     async bulkUpdateRecords(entity: string, records: any[]) {
@@ -181,7 +220,6 @@ export class BulkActionService {
         await this.redisClient.rpush(cacheKey, JSON.stringify(message.record));
         const cacheListLength = await this.redisClient.llen(cacheKey)
         if (cacheListLength >= this.CONSUMER_BATCH_SIZE_UNTIL_PROCESSING) {
-            console.log(`Processing batch for ${message.actionId} - count ${cacheListLength}`)
             await this.processBatchForConsumer(cacheKey, message.actionId)
         }
     }
