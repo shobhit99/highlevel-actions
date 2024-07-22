@@ -262,7 +262,8 @@ export class BulkActionService {
                 actionId,
                 skippedRecords: bulkAction.skippedCount,
                 updatedRecords: bulkAction.successCount,
-                failedRecords: bulkAction.failedCount
+                failedRecords: bulkAction.failedCount,
+                totalRecords: bulkAction.totalRecords
             }
         } else {
             const bulkActionCachedStats = await this.getBulkActionStats(bulkAction.actionId);
@@ -270,7 +271,8 @@ export class BulkActionService {
                 actionId,
                 skippedRecords: bulkActionCachedStats.skippedCount,
                 updatedRecords: bulkActionCachedStats.updatedCount,
-                failedRecords: bulkActionCachedStats.failureCount
+                failedRecords: bulkActionCachedStats.failureCount,
+                totalRecords: bulkAction.totalRecords
             }
         }
     }
