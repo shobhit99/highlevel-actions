@@ -241,13 +241,14 @@ export class BulkActionService {
         const skippedCount = bulkActionDetails.skippedCount
         if (stats.totalProcessed === totalRecords - (skippedCount || 0)) {
             console.log(`Marking batch ${actionId} as complete at ${new Date().toLocaleString()}`);
-            await this.bulkActionRepository.update({ actionId }, { status: BulkActionStatus.COMPLETED, failedCount: stats.failureCount, successCount: stats.updatedCount })
+            await this.bulkActionRepository.update({ actionId }, { status: BulkActionStatus.COMPLETED, failedCount: stats.failureCount, successCount: stats.updatedCount, completedAt: new Date() })
             this.pusherService.trigger("bulk-action", 'bulk-action-updated', {
                 bulkAction: {
                     ...bulkActionDetails,
                     status: BulkActionStatus.COMPLETED,
                     failedCount: stats.failureCount,
-                    successCount: stats.updatedCount
+                    successCount: stats.updatedCount,
+                    completedAt: new Date().toISOString()
                 }
             })
             this.redisClient.del(`${this.BULK_ACTION_CACHE_KEY_DETAILS_PREFIX}_${actionId}`)

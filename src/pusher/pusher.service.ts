@@ -17,7 +17,6 @@ export class PusherService {
     }
 
     public async trigger(channel: string, event: string, data: any) {
-        const output = await this.pusher.trigger(channel, event, data);
-        console.log(output);
+        this.pusher.trigger(channel, event, data);
     }
 }

@@ -42,6 +42,9 @@ export class BulkAction {
 
     @Column()
     successCount: number;
+
+    @Column({ type: 'timestamptz' })
+    completedAt: Date;
 }
 
 /*
@@ -60,4 +63,6 @@ CREATE TABLE bulk_action (
     success_count INT default 0,
     entity VARCHAR(255)
 );
+
+alter table bulk_action add column completed_at timestamptz;
 */
