@@ -113,7 +113,7 @@ export class BulkActionService {
             });
             job.start();
             this.bulkActionRepository.update({ actionId: bulkAction.actionId }, { status: BulkActionStatus.SCHEDULED });
-            this.pusherService.trigger("bulk-action", 'bulk-action-scheduled', {
+            this.pusherService.trigger("bulk-action", 'bulk-action-updated', {
                 bulkAction: {
                     ...bulkAction,
                     status: BulkActionStatus.SCHEDULED

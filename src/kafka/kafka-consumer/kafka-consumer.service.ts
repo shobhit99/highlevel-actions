@@ -6,13 +6,15 @@ import { BulkActionService } from 'src/action/bulk-action.service';
 
 @Injectable()
 export class KafkaConsumerService implements OnModuleInit, OnApplicationShutdown {
-  private readonly TOTAL_CONSUMERS = 1;
+  private TOTAL_CONSUMERS = 6;
 
   constructor(
     private readonly configService: ConfigService,
     @Inject(forwardRef(() => BulkActionService))
     private readonly bulkActionService: BulkActionService
-  ) {}
+  ) {
+    this.TOTAL_CONSUMERS = this.configService.get('KAFKA_CONSUMERS') || this.TOTAL_CONSUMERS;
+  }
 
   private readonly consumers = [];
 
